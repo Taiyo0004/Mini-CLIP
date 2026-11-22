@@ -22,8 +22,8 @@ def cosine_lr(optimizer, base_lr, warmup_steps, total_steps):
     return set_lr
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler=None,
-                    set_lr=None, start_step=0, grad_clip=1.0, log_every=50):
+def train_one_epoch(model, loader, optimizer, device, scaler=None, set_lr=None,
+                    start_step=0, grad_clip=1.0, log_every=50, channels_last=False):
     model.train()
     running, seen = 0.0, 0
     step = start_step
@@ -32,6 +32,8 @@ def train_one_epoch(model, loader, optimizer, device, scaler=None,
         if set_lr is not None:
             set_lr(step)
         images = images.to(device, non_blocking=True)
+        if channels_last:
+            images = images.contiguous(memory_format=torch.channels_last)
         tokens = tokens.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
@@ -65,7 +67,7 @@ def train_one_epoch(model, loader, optimizer, device, scaler=None,
 
 @torch.no_grad()
 def encode_split(model, root, images, captions, tokenizer, transform, device,
-                 batch_size=64, num_workers=2):
+                 batch_size=64, num_workers=0):
     """Embed every image and every caption in a split."""
     model.eval()
     texts, text2img = flatten_eval_split(images, captions)

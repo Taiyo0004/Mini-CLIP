@@ -25,7 +25,7 @@ def main():
     p.add_argument("--data", default="data")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--split", default="test", choices=["val", "test"])
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--workers", type=int, default=0)
     p.add_argument("--examples", type=int, default=0,
                    help="print this many caption -> top-5 image retrievals")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

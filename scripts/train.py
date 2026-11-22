@@ -32,12 +32,18 @@ def get_args():
     p.add_argument("--weight-decay", type=float, default=0.1)
     p.add_argument("--warmup", type=int, default=200, help="warmup steps")
     p.add_argument("--image-size", type=int, default=224)
+    p.add_argument("--eval-every", type=int, default=1, help="run val every N epochs")
+    p.add_argument("--channels-last", action="store_true",
+                   help="slightly faster convs on tensor-core GPUs")
     p.add_argument("--embed-dim", type=int, default=512)
     p.add_argument("--image-width", type=int, default=48)
     p.add_argument("--text-width", type=int, default=256)
     p.add_argument("--text-layers", type=int, default=4)
     p.add_argument("--text-heads", type=int, default=4)
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--eval-workers", type=int, default=0,
+                   help="keep at 0 on Windows, spawning workers per eval can deadlock")
+    p.add_argument("--resume", default=None, help="path to a checkpoint to continue from")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--amp", action="store_true", help="mixed precision, cuda only")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -62,6 +68,7 @@ def main():
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=(device.type == "cuda"), drop_last=True,
+        persistent_workers=args.workers > 0,
     )
     eval_tf = build_transform(args.image_size, train=False)
 
@@ -75,6 +82,8 @@ def main():
         text_heads=args.text_heads,
         pad_id=tokenizer.pad_id,
     ).to(device)
+    if args.channels_last:
+        model = model.to(memory_format=torch.channels_last)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"{n_params / 1e6:.1f}M params, {len(train_ds)} training pairs")
 
@@ -95,21 +104,43 @@ def main():
     set_lr = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
     scaler = torch.amp.GradScaler(device.type, enabled=args.amp and device.type == "cuda")
 
-    log_path = os.path.join(args.out, "log.csv")
-    with open(log_path, "w", newline="") as f:
-        csv.writer(f).writerow(
-            ["epoch", "train_loss", "t2i_R@1", "t2i_R@5", "t2i_R@10",
-             "i2t_R@1", "i2t_R@5", "i2t_R@10", "rsum", "minutes"]
-        )
+    start_epoch, best, step = 1, -1.0, 0
+    if args.resume:
+        ck = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ck["model"])
+        if "optimizer" in ck:
+            optimizer.load_state_dict(ck["optimizer"])
+        start_epoch = ck["epoch"] + 1
+        step = ck.get("step", (start_epoch - 1) * len(train_loader))
+        best = ck.get("best", -1.0)
+        print(f"resumed from {args.resume} at epoch {start_epoch}")
 
-    best, step, t0 = -1.0, 0, time.time()
-    for epoch in range(1, args.epochs + 1):
+    log_path = os.path.join(args.out, "log.csv")
+    mode = "a" if args.resume and os.path.exists(log_path) else "w"
+    with open(log_path, mode, newline="") as f:
+        if mode == "w":
+            csv.writer(f).writerow(
+                ["epoch", "train_loss", "t2i_R@1", "t2i_R@5", "t2i_R@10",
+                 "i2t_R@1", "i2t_R@5", "i2t_R@10", "rsum", "minutes"]
+            )
+
+    t0 = time.time()
+    for epoch in range(start_epoch, args.epochs + 1):
         loss, step = train_one_epoch(
             model, train_loader, optimizer, device, scaler=scaler,
-            set_lr=set_lr, start_step=step,
+            set_lr=set_lr, start_step=step, channels_last=args.channels_last,
         )
+        last_epoch = epoch == args.epochs
+        if epoch % args.eval_every and not last_epoch:
+            print(f"epoch {epoch:3d}  loss {loss:.3f}  (val skipped)")
+            torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                        "args": vars(args), "vocab_size": len(tokenizer),
+                        "epoch": epoch, "step": step, "best": best, "val": None},
+                       os.path.join(args.out, "last.pt"))
+            continue
+
         m = evaluate(model, args.root, splits["val"], captions, tokenizer,
-                     eval_tf, device, num_workers=args.workers)
+                     eval_tf, device, num_workers=args.eval_workers)
         mins = (time.time() - t0) / 60
         print(f"epoch {epoch:3d}  loss {loss:.3f}  "
               f"t2i R@1 {m['t2i_R@1']:.1f} R@5 {m['t2i_R@5']:.1f}  "
@@ -125,9 +156,12 @@ def main():
 
         ckpt = {
             "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
             "args": vars(args),
             "vocab_size": len(tokenizer),
             "epoch": epoch,
+            "step": step,
+            "best": max(best, m["rsum"]),
             "val": m,
         }
         torch.save(ckpt, os.path.join(args.out, "last.pt"))
