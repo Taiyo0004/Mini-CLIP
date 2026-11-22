@@ -40,11 +40,27 @@ pip install -r requirements.txt
 Download Flickr8k (I used the Kaggle mirror, `adityajn105/flickr8k`) and unzip it so
 you have `data/flickr8k/Images/` and `data/flickr8k/captions.txt`. Then:
 
+These are the exact commands behind the numbers in the results table:
+
 ```bash
-python scripts/prepare_flickr8k.py --root data/flickr8k
-python scripts/train.py --root data/flickr8k --epochs 30 --batch-size 128 --amp
-python scripts/evaluate.py --root data/flickr8k --ckpt runs/mini-clip/best.pt
-python scripts/baseline_clip.py --root data/flickr8k
+# resize once, the dataloader is the bottleneck otherwise
+python scripts/resize_images.py --root data/flickr8k --out data/flickr8k-160 --size 160
+python scripts/prepare_flickr8k.py --root data/flickr8k-160
+
+python scripts/train.py --root data/flickr8k-160 \
+    --image-size 128 --batch-size 128 --amp --channels-last \
+    --workers 4 --eval-workers 0 --epochs 40 --eval-every 2
+
+python scripts/evaluate.py --root data/flickr8k-160 --ckpt runs/mini-clip/best.pt --examples 3
+
+# baseline reads the originals, that is the resolution its preprocessing expects
+python scripts/baseline_clip.py --root data/flickr8k --batch-size 32
+```
+
+Sanity checks that need no dataset and take a couple of seconds:
+
+```bash
+python tests/test_shapes.py
 ```
 
 ### On a 4 GB GPU
